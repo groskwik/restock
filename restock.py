@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+#!/usr/bin/env python
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -260,9 +261,16 @@ def main():
     ap.add_argument("--timeout", type=int, default=30, help="WebDriverWait timeout seconds.")
     ap.add_argument("--debug", action="store_true", help="Verbose logging.")
     ap.add_argument("--profile-dir", type=str, default="", help="Chrome user-data-dir to reuse login; default creates ./chrome_profile_selenium")
+    ap.add_argument("--headless", action="store_true", help="Run Chrome in headless mode")
     args = ap.parse_args()
 
     options = webdriver.ChromeOptions()
+
+    # Headless support (explicit opt-in)
+    if args.headless:
+        options.add_argument("--headless=new")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--window-size=1920,1080")
 
     # Dedicated profile (recommended) so you stay logged in
     if args.profile_dir.strip():
@@ -292,13 +300,13 @@ def main():
             debug=args.debug,
         )
 
-        print("\nSummary")
+        print("\nSummary of restocking:")
         print(f"  Attempted:       {res.attempted}")
         print(f"  Updated (0->1):  {res.updated}")
         print(f"  Skipped nonzero: {res.skipped_nonzero}")
         print(f"  Failed:          {res.failed}")
 
-        input("\nDone. Press Enter to quit...")
+        input("\nDone. Press Enter...")
 
     finally:
         driver.quit()
@@ -306,3 +314,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
