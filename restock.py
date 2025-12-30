@@ -5,7 +5,9 @@ from dataclasses import dataclass
 from pathlib import Path
 import argparse
 import time
+import os
 
+import psutil
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -58,10 +60,32 @@ def set_input_value(driver, el, value: str):
 
 
 def ensure_logged_in_or_pause(driver):
-    cur = driver.current_url.lower()
+    cur = (driver.current_url or "").lower()
     if "signin" in cur or "login" in cur:
         print("Redirected to sign-in. Log in in the opened browser window, then press Enter here.")
         input()
+
+
+def kill_chrome_using_profile(profile_dir: str, debug: bool = True) -> None:
+    profile_dir_abs = os.path.abspath(profile_dir)
+
+    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+        try:
+            name = (proc.info.get("name") or "").lower()
+            if "chrome" not in name:
+                continue
+            cmdline_list = proc.info.get("cmdline") or []
+            if not cmdline_list:
+                continue
+            cmdline = " ".join(cmdline_list)
+            if profile_dir_abs in cmdline:
+                if debug:
+                    print(f"[INFO] Killing stale Chrome PID={proc.pid} using profile: {profile_dir_abs}")
+                proc.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+    time.sleep(0.5)
 
 
 def click_available_qty_header_until_ascending(driver, timeout=30, max_clicks=4, debug=True):
@@ -185,6 +209,20 @@ def restock_all_zero_to_one(driver, timeout=30, max_items=200, dry_run=False, de
     return res
 
 
+def hide_window_offscreen(driver, debug: bool = False) -> None:
+    """
+    Make a normal (non-headless) Chrome window effectively invisible by moving it off-screen.
+    """
+    try:
+        driver.set_window_position(-32000, -32000)
+        driver.minimize_window()
+        if debug:
+            print("[INFO] Chrome window moved off-screen and minimized.")
+    except Exception as e:
+        if debug:
+            print("[WARN] Could not move/minimize window:", e)
+
+
 def main():
     ap = argparse.ArgumentParser(description="eBay Seller Hub: restock Available quantity 0→1")
     ap.add_argument("--dry-run", action="store_true")
@@ -192,16 +230,63 @@ def main():
     ap.add_argument("--timeout", type=int, default=30)
     ap.add_argument("--debug", action="store_true")
     ap.add_argument("--profile-dir", type=str, default="")
-    ap.add_argument("--no-headless", action="store_true", help="Run Chrome with a visible window")
+
+    # Keep your existing switches (compatibility)
+    ap.add_argument("--no-headless", action="store_true", help="Run Chrome with a visible UI renderer (non-headless)")
+    ap.add_argument("--hide-window", action="store_true", help="Non-headless, but move Chrome off-screen/minimize")
+    ap.add_argument("--no-kill-profile", action="store_true", help="Do NOT kill stale Chrome using the same profile")
+
+    # New override: allow showing the window while non-headless
+    ap.add_argument("--show-window", action="store_true", help="Force showing the Chrome window (non-headless only)")
+
     args = ap.parse_args()
 
     options = webdriver.ChromeOptions()
 
-    # DEFAULT = headless
-    if not args.no_headless:
+    #
+    # NEW DEFAULT:
+    #   - non-headless (because eBay UI can differ in real headless)
+    #   - hidden window (equivalent to --no-headless --hide-window)
+    #
+    headless = False  # default is NOT headless
+    hide_window = True  # default is hidden
+
+    # If user explicitly asks for headless behavior by NOT setting --no-headless previously,
+    # we keep your old meaning: headless is only used when --no-headless is NOT provided.
+    # But since we changed default to non-headless, we need an explicit way to go headless.
+    # To avoid breaking your CLI, we interpret:
+    #   - if user does NOT pass --no-headless AND does NOT pass --hide-window and does NOT pass --show-window,
+    #     we still stay non-headless by default (hidden).
+    # If you want true headless, add it as an explicit flag later.
+    #
+    # For now: preserve your working non-headless path; headless is only enabled if you remove this default.
+    #
+    if args.no_headless:
+        headless = False
+    else:
+        # KEEP default non-headless; do NOT switch to true headless silently.
+        headless = False
+
+    # Determine hiding behavior:
+    # - default: hidden (unless --show-window)
+    # - if user passes --hide-window explicitly, keep hidden
+    # - if user passes --show-window, show it
+    if args.show_window:
+        hide_window = False
+    elif args.hide_window:
+        hide_window = True
+    else:
+        hide_window = True  # default
+
+    # Configure Chrome options
+    if headless:
         options.add_argument("--headless=new")
         options.add_argument("--disable-gpu")
         options.add_argument("--window-size=1920,1080")
+    else:
+        options.add_argument("--window-size=1200,900")
+        if hide_window:
+            options.add_argument("--window-position=-32000,-32000")
 
     if args.profile_dir.strip():
         profile_dir = Path(args.profile_dir).expanduser().resolve()
@@ -209,13 +294,27 @@ def main():
         profile_dir = Path(__file__).with_name("chrome_profile_selenium").resolve()
 
     profile_dir.mkdir(parents=True, exist_ok=True)
+
+    if not args.no_kill_profile:
+        kill_chrome_using_profile(str(profile_dir), debug=args.debug)
+
     options.add_argument(f"--user-data-dir={profile_dir}")
+    options.add_argument("--profile-directory=Default")
+    options.add_argument("--no-first-run")
+    options.add_argument("--no-default-browser-check")
+    options.add_argument("--disable-extensions")
+    options.add_argument("--disable-notifications")
+    options.add_argument("--remote-debugging-port=0")
 
     driver = webdriver.Chrome(options=options)
+
+    # If requested (or default), hide it after startup as well (more reliable than flags alone)
+    if (not headless) and hide_window:
+        hide_window_offscreen(driver, debug=args.debug)
+
     try:
         driver.get(ACTIVE_URL)
         ensure_logged_in_or_pause(driver)
-
         driver.get(ACTIVE_URL)
 
         click_available_qty_header_until_ascending(driver, timeout=args.timeout, debug=args.debug)
